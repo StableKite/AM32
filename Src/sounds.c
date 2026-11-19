@@ -44,22 +44,46 @@ void setCaptureCompare()
 /*
  * @Brief 	Freq in hz, bduration in ms
  */
-void playBJNote(uint16_t freq, uint16_t bduration)
+static void setBlueJayNote(uint16_t freq, uint8_t volume)
 {
 #ifdef NXP
     uint32_t PWM_IPBUS_CLOCK_HZ = 192000000;
     SET_ACTUAL_PRESCALER_PWM(7);				// Set prescaler to 128 (max)
     SET_AUTO_RELOAD_PWM((PWM_IPBUS_CLOCK_HZ / 128) / freq);	// Set PWM reload time to corresponding frequency
-    SET_DUTY_CYCLE_ALL(beep_volume);				// Set beep volume (between 0 and 22, see setVolume())
+    SET_DUTY_CYCLE_ALL(volume);
 #else
     uint16_t timerOne_reload;
     SET_PRESCALER_PWM(9);
     timerOne_reload = (uint16_t)(CPU_FREQUENCY_MHZ * 100000 / freq);
     SET_AUTO_RELOAD_PWM(timerOne_reload);
-    SET_DUTY_CYCLE_ALL(beep_volume * timerOne_reload/TIM1_AUTORELOAD);
+    SET_DUTY_CYCLE_ALL(volume * timerOne_reload/TIM1_AUTORELOAD);
+#endif
+}
+
+void playBJNote(uint16_t freq, uint16_t bduration)
+{
+    setBlueJayNote(freq, beep_volume);
+#ifndef NXP
     delayMillis(bduration);
 #endif
 }
+
+#ifdef AT32PB4_540_F421
+void setDshotMelodyTone(uint16_t frequency, uint8_t volume)
+{
+    allOff();
+    SET_DUTY_CYCLE_ALL(0);
+    if (!frequency || !volume || !beep_volume) {
+        SET_PRESCALER_PWM(0);
+        SET_AUTO_RELOAD_PWM(TIMER1_MAX_ARR);
+        return;
+    }
+    const uint8_t requested = (uint8_t)(volume * 3);
+    setBlueJayNote(frequency, requested < beep_volume ? requested : beep_volume);
+    generatePwmTimerEvent();
+    comStep(3);
+}
+#endif
 
 uint16_t getBlueJayNoteFrequency(uint8_t bjarrayfreq)
 {

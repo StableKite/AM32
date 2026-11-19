@@ -12,6 +12,10 @@
 
 void computeDshotDMA(void);
 void make_dshot_package(uint16_t com_time);
+#ifdef AT32PB4_540_F421
+#include <stdbool.h>
+bool handleDshotMelody(uint16_t value, bool telemetry);
+#endif
 
 extern void playInputTune(void);
 extern void playInputTune2(void);

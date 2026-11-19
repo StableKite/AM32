@@ -104,6 +104,11 @@ void computeDshotDMA()
         if (calcCRC == checkCRC) {
             signaltimeout = 0;
             dshot_goodcounts++;
+#ifdef AT32PB4_540_F421
+            if (handleDshotMelody(tocheck, dpulse[11] != 0)) {
+                return;
+            }
+#endif
             if (dpulse[11] == 1) {
                 send_telemetry = 1;
             }

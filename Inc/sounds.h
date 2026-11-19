@@ -20,6 +20,9 @@ void playDefaultTone(void);
 void playChangedTone(void);
 
 void setVolume(uint8_t volume);
+#ifdef AT32PB4_540_F421
+void setDshotMelodyTone(uint16_t frequency, uint8_t volume);
+#endif
 
 extern void delayMillis(uint32_t millis);
 

@@ -9,6 +9,8 @@ The firmware is intended to be safe and fast with smooth fast startups and linea
 
 ## Features
 
+[Мелодии через DShot для AT32PB4_540_F421](doc/dshot-melody.md) в форке StableKite.
+
 AM32 has the following features:
 
 - Firmware upgradable via betaflight passthrough, single wire serial or arduino

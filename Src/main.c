@@ -221,6 +221,9 @@ an settings option)
 #include "common.h"
 #include "comparator.h"
 #include "dshot.h"
+#ifdef AT32PB4_540_F421
+#include "dshot_melody.h"
+#endif
 #include "eeprom.h"
 #include "functions.h"
 #include "peripherals.h"
@@ -908,6 +911,11 @@ void commutate()
 void PeriodElapsedCallback()
 {
     DISABLE_COM_TIMER_INT(); // disable interrupt
+#ifdef AT32PB4_540_F421
+    if (dshotMelodyActive()) {
+        return;
+    }
+#endif
     commutate();
     commutation_interval = ((commutation_interval)+((lastzctime + thiszctime) >> 1))>>1;
   	if (!eepromBuffer.auto_advance) {
@@ -931,6 +939,11 @@ void PeriodElapsedCallback()
  */
 void interruptRoutine()
 {
+#ifdef AT32PB4_540_F421
+    if (dshotMelodyActive()) {
+        return;
+    }
+#endif
 //   if (average_interval > 125) {
 //        if ((INTERVAL_TIMER_COUNT < 125) && (duty_cycle < 600) && (zero_crosses < 500)) { // should be impossible, desync?exit anyway
 //           return;
@@ -1339,8 +1352,82 @@ if (!stepper_sine && armed) {
 #endif
 }
 
+#ifdef AT32PB4_540_F421
+static volatile uint32_t melody_ms;
+static volatile uint16_t melody_idle_ticks;
+
+static bool melodyMotorIdle(void)
+{
+    return armed && !running && !input && !newinput && !adjusted_input && !e_rpm &&
+           !LOW_VOLTAGE_CUTOFF;
+}
+
+bool handleDshotMelody(uint16_t value, bool telemetry)
+{
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    const bool idle = melody_idle_ticks >= LOOP_FREQUENCY_HZ / 2 && melodyMotorIdle();
+    const melody_input_t result = dshotMelodyReceive(value, telemetry, idle, melody_ms);
+    if (result == MELODY_ENTERED) {
+        DISABLE_COM_TIMER_INT();
+        maskPhaseInterrupts();
+        allOff();
+        SET_DUTY_CYCLE_ALL(0);
+        armed = 0;
+        EDT_ARMED = 0;
+        zero_input_count = armed_timeout_count = 0;
+        duty_cycle = duty_cycle_setpoint = 0;
+        dshotcommand = play_tone_flag = 0;
+        melody_idle_ticks = 0;
+    }
+    __set_PRIMASK(mask);
+    return result != MELODY_IGNORED;
+}
+
+static void serviceDshotMelody(void)
+{
+    static uint32_t last_tick;
+    if (melody_ms == last_tick) {
+        return;
+    }
+    const uint32_t mask = __get_PRIMASK();
+    __disable_irq();
+    last_tick = melody_ms;
+    const melody_output_t output = dshotMelodyPoll(last_tick);
+    if (output.action == MELODY_NOTE) {
+        setDshotMelodyTone(output.frequency, output.volume);
+    } else if (output.action == MELODY_EXIT || output.action == MELODY_RESET) {
+        setDshotMelodyTone(0, 0);
+        signaltimeout = 0;
+        zero_input_count = armed_timeout_count = 0;
+        if (output.action == MELODY_RESET) {
+            NVIC_SystemReset();
+        }
+    }
+    __set_PRIMASK(mask);
+    RELOAD_WATCHDOG_COUNTER();
+}
+#endif
+
 void tenKhzRoutine()
 { // 20khz as of 2.00 to be renamed
+#ifdef AT32PB4_540_F421
+    static uint8_t ticks;
+    if (++ticks == LOOP_FREQUENCY_HZ / 1000) {
+        ticks = 0;
+        melody_ms++;
+    }
+    if (dshotMelodyActive()) {
+        return;
+    }
+    if (melodyMotorIdle() && signaltimeout < LOOP_FREQUENCY_HZ / 20) {
+        if (melody_idle_ticks < LOOP_FREQUENCY_HZ / 2) {
+            melody_idle_ticks++;
+        }
+    } else {
+        melody_idle_ticks = 0;
+    }
+#endif
     duty_cycle = duty_cycle_setpoint;
     tenkhzcounter++;
     ledcounter++;
@@ -1575,6 +1662,11 @@ void processDshot()
         compute_dshot_flag = 0;
         return;
     }
+#ifdef AT32PB4_540_F421
+    if (dshotMelodyActive()) {
+        return;
+    }
+#endif
     setInput();
 }
 
@@ -1925,6 +2017,12 @@ int main(void)
 #endif
 
     while (1) {
+#ifdef AT32PB4_540_F421
+        if (dshotMelodyActive()) {
+            serviceDshotMelody();
+            continue;
+        }
+#endif
 e_com_time = ((commutation_intervals[0] + commutation_intervals[1] + commutation_intervals[2] + commutation_intervals[3] + commutation_intervals[4] + commutation_intervals[5]) + 4) >> 1; // COMMUTATION INTERVAL IS 0.5US INCREMENTS 
 
 #if defined(FIXED_DUTY_MODE) || defined(FIXED_SPEED_MODE)
