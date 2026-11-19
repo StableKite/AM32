@@ -450,7 +450,7 @@ uint16_t ADC_raw_volts;
 uint16_t ADC_raw_current;
 uint16_t ADC_raw_input;
 uint16_t ADC_raw_ntc;
-uint8_t PROCESS_ADC_FLAG = 0;
+volatile uint8_t PROCESS_ADC_FLAG = 0;
 volatile char send_telemetry = 0;
 char telemetry_done = 0;
 char prop_brake_active = 0;
@@ -1352,14 +1352,121 @@ if (!stepper_sine && armed) {
 #endif
 }
 
+static void serviceAdc(void)
+{
+    if (PROCESS_ADC_FLAG != 1) {
+        return;
+    }
+#if defined(STMICRO)
+    ADC_DMA_Callback();
+    LL_ADC_REG_StartConversion(ADC1);
+#ifdef USE_ADC_1_2
+  LL_ADC_REG_StartConversion(ADC2);
+#endif
+    converted_degrees = __LL_ADC_CALC_TEMPERATURE(3300, ADC_raw_temp, LL_ADC_RESOLUTION_12B);
+#endif
+#ifdef MCU_GDE23
+    ADC_DMA_Callback();
+    // converted_degrees = (1.43 - ADC_raw_temp * 3.3 / 4096) * 1000 / 4.3 + 25;
+    converted_degrees = ((int32_t)(357.5581395348837f * (1 << 16)) - ADC_raw_temp * (int32_t)(0.18736373546511628f * (1 << 16))) >> 16;
+    adc_software_trigger_enable(ADC_REGULAR_CHANNEL);
+#endif
+#ifdef ARTERY
+    ADC_DMA_Callback();
+    adc_ordinary_software_trigger_enable(ADC1, TRUE);
+    #ifdef USE_NTC
+    converted_degrees = getNTCDegrees(ADC_raw_ntc);
+    #else
+    converted_degrees = getConvertedDegrees(ADC_raw_temp);
+    #endif
+#endif
+#ifdef NXP
+    //Call ADC_DMA callback to get raw data
+    ADC_DMA_Callback();
+
+    //Convert temperature data to actual temperature in degrees Celsius
+    converted_degrees = computeTemperature(ADC_raw_temp[0], ADC_raw_temp[1]);
+
+    //Start ADC conversion
+    startADCConversion();
+#endif
+#ifdef WCH
+    startADCConversion( );
+    converted_degrees = getConvertedDegrees(ADC_raw_temp);
+#endif
+    degrees_celsius = converted_degrees;
+#ifdef NXP
+    //MCXA has 16-bit ADC data
+    battery_voltage = ((7 * battery_voltage) + ((ADC_raw_volts * 3300 / 65535 * VOLTAGE_DIVIDER) / 100)) / 8;
+    smoothed_raw_current = getSmoothedCurrent();
+    //Actual current is in 10mA, so 1 = 10mA
+    actual_current = (((smoothed_raw_current * 3300 / 65535) - CURRENT_OFFSET) * 100) / (MILLIVOLT_PER_AMP);
+#else
+    battery_voltage = ((7 * battery_voltage) + ((ADC_raw_volts * 3300 / 4095 * VOLTAGE_DIVIDER) / 100)) >> 3;
+    smoothed_raw_current = getSmoothedCurrent();
+    actual_current = ((smoothed_raw_current * 3300 / 41) - (CURRENT_OFFSET * 100)) / (MILLIVOLT_PER_AMP);
+#endif
+    if (actual_current < 0) {
+        actual_current = 0;
+    }
+    if (eepromBuffer.low_voltage_cut_off == 1) {
+        if (battery_voltage < (cell_count * low_cell_volt_cutoff)) {
+          low_voltage_count++;
+        } else {
+          if(!LOW_VOLTAGE_CUTOFF){  // if set low cutoff has happened, require power cycle to reset
+            low_voltage_count = 0;
+          }
+        }
+    }
+    if (eepromBuffer.low_voltage_cut_off == 2 ){   // absolute cut off
+      if (battery_voltage <  (eepromBuffer.absolute_voltage_cutoff * 50)) {
+        low_voltage_count++;
+        } else {
+          if(!LOW_VOLTAGE_CUTOFF){
+            low_voltage_count = 0;
+          }
+        }
+    }
+    if (low_voltage_count > (10000 - (stepper_sine * 9900))) {      // 10 second wait before cut-off for low voltage
+      LOW_VOLTAGE_CUTOFF = 1;
+      input = 0;
+      allOff();
+      maskPhaseInterrupts();
+      running = 0;
+      zero_input_count = 0;
+      armed = 0;
+     }
+
+    PROCESS_ADC_FLAG = 0;
+#ifdef USE_ADC_INPUT
+    if (ADC_raw_input < 10) {
+        zero_input_count++;
+    } else {
+        zero_input_count = 0;
+    }
+#endif
+}
+
+#ifdef USE_SERIAL_TELEMETRY
+static void sendSerialTelemetry(void)
+{
+    makeTelemPackage((int8_t)degrees_celsius, battery_voltage, actual_current,
+                    (uint16_t)(consumed_current >> 16), e_rpm);
+    send_telem_DMA(10);
+}
+#endif
+
 #ifdef AT32PB4_540_F421
+enum { MELODY_MAX_TEMPERATURE = 70, MELODY_MAX_CURRENT_RISE = 200, MELODY_CURRENT_TRIP_MS = 8 };
 static volatile uint32_t melody_ms;
 static volatile uint16_t melody_idle_ticks;
+static volatile int16_t melody_idle_current;
+static volatile uint8_t melody_overcurrent;
 
 static bool melodyMotorIdle(void)
 {
     return armed && !running && !input && !newinput && !adjusted_input && !e_rpm &&
-           !LOW_VOLTAGE_CUTOFF;
+           !LOW_VOLTAGE_CUTOFF && degrees_celsius < MELODY_MAX_TEMPERATURE;
 }
 
 bool handleDshotMelody(uint16_t value, bool telemetry)
@@ -1379,6 +1486,8 @@ bool handleDshotMelody(uint16_t value, bool telemetry)
         duty_cycle = duty_cycle_setpoint = 0;
         dshotcommand = play_tone_flag = 0;
         melody_idle_ticks = 0;
+        melody_idle_current = actual_current;
+        melody_overcurrent = 0;
     }
     __set_PRIMASK(mask);
     return result != MELODY_IGNORED;
@@ -1386,13 +1495,26 @@ bool handleDshotMelody(uint16_t value, bool telemetry)
 
 static void serviceDshotMelody(void)
 {
-    static uint32_t last_tick;
+    static uint32_t last_tick, last_telemetry;
     if (melody_ms == last_tick) {
         return;
     }
+    serviceAdc();
     const uint32_t mask = __get_PRIMASK();
     __disable_irq();
     last_tick = melody_ms;
+    if ((int)actual_current - melody_idle_current > MELODY_MAX_CURRENT_RISE ||
+        (use_current_limit && actual_current > eepromBuffer.limits.current * 200)) {
+        if (melody_overcurrent < MELODY_CURRENT_TRIP_MS) {
+            melody_overcurrent++;
+        }
+    } else {
+        melody_overcurrent = 0;
+    }
+    if (degrees_celsius >= MELODY_MAX_TEMPERATURE || LOW_VOLTAGE_CUTOFF ||
+        melody_overcurrent >= MELODY_CURRENT_TRIP_MS) {
+        dshotMelodyAbort();
+    }
     const melody_output_t output = dshotMelodyPoll(last_tick);
     if (output.action == MELODY_NOTE) {
         setDshotMelodyTone(output.frequency, output.volume);
@@ -1405,6 +1527,10 @@ static void serviceDshotMelody(void)
         }
     }
     __set_PRIMASK(mask);
+    if (dshotMelodyActive() && last_tick - last_telemetry >= 100) {
+        last_telemetry = last_tick;
+        sendSerialTelemetry();
+    }
     RELOAD_WATCHDOG_COUNTER();
 }
 #endif
@@ -1416,6 +1542,9 @@ void tenKhzRoutine()
     if (++ticks == LOOP_FREQUENCY_HZ / 1000) {
         ticks = 0;
         melody_ms++;
+        if (dshotMelodyActive()) {
+            PROCESS_ADC_FLAG = 1;
+        }
     }
     if (dshotMelodyActive()) {
         return;
@@ -2197,9 +2326,7 @@ if(zero_crosses < 5){
 #endif
         if (send_telemetry) {
 #ifdef USE_SERIAL_TELEMETRY
-            makeTelemPackage((int8_t)degrees_celsius, battery_voltage, actual_current,
-                (uint16_t)(consumed_current >> 16), e_rpm);
-            send_telem_DMA(10);
+            sendSerialTelemetry();
             send_telemetry = 0;
 #endif
         } else if(send_esc_info_flag ) {
@@ -2207,96 +2334,7 @@ if(zero_crosses < 5){
            send_telem_DMA(49);
            send_esc_info_flag = 0;
         }
-        if (PROCESS_ADC_FLAG == 1) { // for adc and telemetry set adc counter at 1khz loop rate
-#if defined(STMICRO)
-            ADC_DMA_Callback();
-            LL_ADC_REG_StartConversion(ADC1);
-#ifdef USE_ADC_1_2
-          LL_ADC_REG_StartConversion(ADC2);
-#endif          
-            converted_degrees = __LL_ADC_CALC_TEMPERATURE(3300, ADC_raw_temp, LL_ADC_RESOLUTION_12B);
-#endif
-#ifdef MCU_GDE23
-            ADC_DMA_Callback();
-            // converted_degrees = (1.43 - ADC_raw_temp * 3.3 / 4096) * 1000 / 4.3 + 25;
-            converted_degrees = ((int32_t)(357.5581395348837f * (1 << 16)) - ADC_raw_temp * (int32_t)(0.18736373546511628f * (1 << 16))) >> 16;
-            adc_software_trigger_enable(ADC_REGULAR_CHANNEL);
-#endif
-#ifdef ARTERY
-            ADC_DMA_Callback();
-            adc_ordinary_software_trigger_enable(ADC1, TRUE);
-    #ifdef USE_NTC
-            converted_degrees = getNTCDegrees(ADC_raw_ntc);
-    #else     
-            converted_degrees = getConvertedDegrees(ADC_raw_temp);
-    #endif
-#endif
-#ifdef NXP
-            //Call ADC_DMA callback to get raw data
-            ADC_DMA_Callback();
-
-            //Convert temperature data to actual temperature in degrees Celsius
-            converted_degrees = computeTemperature(ADC_raw_temp[0], ADC_raw_temp[1]);
-
-            //Start ADC conversion
-            startADCConversion();
-#endif
-#ifdef WCH
-            startADCConversion( );
-            converted_degrees = getConvertedDegrees(ADC_raw_temp);
-#endif
-            degrees_celsius = converted_degrees;
-#ifdef NXP
-            //MCXA has 16-bit ADC data
-            battery_voltage = ((7 * battery_voltage) + ((ADC_raw_volts * 3300 / 65535 * VOLTAGE_DIVIDER) / 100)) / 8;
-            smoothed_raw_current = getSmoothedCurrent();
-            //Actual current is in 10mA, so 1 = 10mA
-            actual_current = (((smoothed_raw_current * 3300 / 65535) - CURRENT_OFFSET) * 100) / (MILLIVOLT_PER_AMP);
-#else
-            battery_voltage = ((7 * battery_voltage) + ((ADC_raw_volts * 3300 / 4095 * VOLTAGE_DIVIDER) / 100)) >> 3;
-            smoothed_raw_current = getSmoothedCurrent();
-            actual_current = ((smoothed_raw_current * 3300 / 41) - (CURRENT_OFFSET * 100)) / (MILLIVOLT_PER_AMP);
-#endif
-            if (actual_current < 0) {
-                actual_current = 0;
-            }             
-            if (eepromBuffer.low_voltage_cut_off == 1) {  
-                if (battery_voltage < (cell_count * low_cell_volt_cutoff)) {
-                  low_voltage_count++;
-                } else {
-                  if(!LOW_VOLTAGE_CUTOFF){  // if set low cutoff has happened, require power cycle to reset
-                    low_voltage_count = 0;
-                  }
-                }
-            }
-            if (eepromBuffer.low_voltage_cut_off == 2 ){   // absolute cut off
-              if (battery_voltage <  (eepromBuffer.absolute_voltage_cutoff * 50)) {
-                low_voltage_count++;    
-                } else {
-                  if(!LOW_VOLTAGE_CUTOFF){
-                    low_voltage_count = 0;
-                  }
-                }
-            }
-            if (low_voltage_count > (10000 - (stepper_sine * 9900))) {      // 10 second wait before cut-off for low voltage
-              LOW_VOLTAGE_CUTOFF = 1;
-              input = 0;
-              allOff();
-              maskPhaseInterrupts();
-              running = 0;
-              zero_input_count = 0;
-              armed = 0;
-             }
-           
-            PROCESS_ADC_FLAG = 0;
-#ifdef USE_ADC_INPUT
-            if (ADC_raw_input < 10) {
-                zero_input_count++;
-            } else {
-                zero_input_count = 0;
-            }
-#endif
-        }
+        serviceAdc();
 #ifdef USE_ADC_INPUT
         signaltimeout = 0;
         ADC_smoothed_input = (((10 * ADC_smoothed_input) + ADC_raw_input) / 11);

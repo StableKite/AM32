@@ -12,13 +12,13 @@ enum {
     SYMBOL_TIMEOUT_MS = 50,
     RESET_DELAY_MS = 400,
     IDLE_TIMEOUT_MS = 750,
-    SESSION_TIMEOUT_MS = 8000
+    NOTE_GRACE_MS = 3
 };
 
 extern uint8_t get_crc8(uint8_t *bytes, uint8_t length);
 
 static uint8_t packet[6], shift, bits;
-static uint32_t last_symbol, last_packet, session_start, note_start, reset_at;
+static uint32_t last_symbol, last_packet, note_start, reset_at;
 static uint16_t duration;
 static volatile bool active;
 static melody_action_t stop;
@@ -33,6 +33,13 @@ bool dshotMelodyActive(void)
     return active;
 }
 
+void dshotMelodyAbort(void)
+{
+    if (active && stop == MELODY_UNCHANGED) {
+        stop = MELODY_EXIT;
+    }
+}
+
 melody_input_t dshotMelodyReceive(uint16_t value, bool telemetry, bool idle, uint32_t now)
 {
     if (!telemetry || (value != SYMBOL_ZERO && value != SYMBOL_ONE)) {
@@ -40,9 +47,7 @@ melody_input_t dshotMelodyReceive(uint16_t value, bool telemetry, bool idle, uin
         if (!active) {
             return MELODY_IGNORED;
         }
-        if (stop == MELODY_UNCHANGED) {
-            stop = MELODY_EXIT;
-        }
+        dshotMelodyAbort();
         return MELODY_HANDLED;
     }
 
@@ -75,7 +80,7 @@ melody_input_t dshotMelodyReceive(uint16_t value, bool telemetry, bool idle, uin
     const uint8_t length = packet[4];
     if (command == ENTER && !active && idle && !frequency && !length) {
         active = true;
-        session_start = last_packet = now;
+        last_packet = now;
         return MELODY_ENTERED;
     }
     if (!active || stop != MELODY_UNCHANGED) {
@@ -105,8 +110,7 @@ melody_output_t dshotMelodyPoll(uint32_t now)
         pending.duration = duration = 0;
         return (melody_output_t){action, 0, 0};
     }
-    if (stop != MELODY_UNCHANGED || now - last_packet >= IDLE_TIMEOUT_MS ||
-        now - session_start >= SESSION_TIMEOUT_MS) {
+    if (stop != MELODY_UNCHANGED || now - last_packet >= IDLE_TIMEOUT_MS) {
         const melody_action_t action = stop == MELODY_RESET ? MELODY_RESET : MELODY_EXIT;
         active = false;
         pending.duration = duration = 0;
@@ -123,7 +127,7 @@ melody_output_t dshotMelodyPoll(uint32_t now)
         pending.duration = 0;
         return (melody_output_t){MELODY_NOTE, pending.frequency, pending.volume};
     }
-    if (duration) {
+    if (duration && now - note_start >= (uint32_t)duration + NOTE_GRACE_MS) {
         duration = 0;
         return (melody_output_t){MELODY_NOTE, 0, 0};
     }

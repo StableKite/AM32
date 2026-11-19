@@ -15,6 +15,7 @@ typedef struct {
 } melody_output_t;
 
 bool dshotMelodyActive(void);
+void dshotMelodyAbort(void);
 melody_input_t dshotMelodyReceive(uint16_t value, bool telemetry, bool idle, uint32_t now);
 melody_output_t dshotMelodyPoll(uint32_t now);
 

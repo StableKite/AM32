@@ -36,8 +36,8 @@ def main():
     parser.add_argument("notes", nargs="*", type=parse_note, metavar="ГЦ/МС/ГРОМКОСТЬ")
     parser.add_argument("--probe-blheli", action="store_true")
     args = parser.parse_args()
-    if not (args.probe_blheli or args.notes) or sum(note[1] + 20 for note in args.notes) > 7500:
-        parser.error("Укажите ноты общей длительностью до 7,5 с либо --probe-blheli")
+    if not (args.probe_blheli or args.notes):
+        parser.error("Укажите ноты или --probe-blheli")
 
     sys.path.insert(0, str(args.rp2040_tools.resolve(strict=True)))
     from adapter import Client, VendorTransport, encode_config, frame

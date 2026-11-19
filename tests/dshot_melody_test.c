@@ -47,9 +47,10 @@ int main(void)
     assert(dshotMelodyPoll(start + 249).action == MELODY_UNCHANGED);
     note = dshotMelodyPoll(start + 250);
     assert(note.action == MELODY_NOTE && note.frequency == 660 && note.volume == 1);
-    note = dshotMelodyPoll(start + 350);
+    assert(dshotMelodyPoll(start + 350).action == MELODY_UNCHANGED);
+    note = dshotMelodyPoll(start + 353);
     assert(note.action == MELODY_NOTE && note.frequency == 0);
-    now = start + 351;
+    now = start + 354;
     assert(dshotMelodyReceive(220, false, false, now) == MELODY_HANDLED);
     assert(dshotMelodyPoll(now++).action == MELODY_EXIT && !dshotMelodyActive());
 
@@ -63,6 +64,19 @@ int main(void)
     assert(dshotMelodyPoll(now + 398).action == MELODY_UNCHANGED);
     now += 399;
     assert(dshotMelodyPoll(now++).action == MELODY_RESET && !dshotMelodyActive());
+
+    assert(send(1, 0, 0, true, false) == MELODY_ENTERED);
+    for (unsigned i = 0; i < 80; i++) {
+        const bool rest = i >= 30 && i < 36;
+        send(rest ? 0x10 : 0x12, rest ? 0 : 440, 25, false, false);
+        note = dshotMelodyPoll(now);
+        assert(note.action == MELODY_NOTE && note.frequency == (rest ? 0 : 440) &&
+               note.volume == (rest ? 0 : 2));
+        now += 250 - 48;
+    }
+    assert(dshotMelodyActive());
+    dshotMelodyAbort();
+    assert(dshotMelodyPoll(now++).action == MELODY_EXIT && !dshotMelodyActive());
 
     now = UINT32_MAX - 70;
     assert(send(1, 0, 0, true, false) == MELODY_ENTERED);

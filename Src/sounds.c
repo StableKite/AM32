@@ -71,17 +71,31 @@ void playBJNote(uint16_t freq, uint16_t bduration)
 #ifdef AT32PB4_540_F421
 void setDshotMelodyTone(uint16_t frequency, uint8_t volume)
 {
-    allOff();
-    SET_DUTY_CYCLE_ALL(0);
+    static uint16_t playing_frequency;
+    static uint8_t playing_level;
     if (!frequency || !volume || !beep_volume) {
+        if (!playing_frequency) {
+            return;
+        }
+        allOff();
+        SET_DUTY_CYCLE_ALL(0);
         SET_PRESCALER_PWM(0);
         SET_AUTO_RELOAD_PWM(TIMER1_MAX_ARR);
+        playing_frequency = 0;
         return;
     }
     const uint8_t requested = (uint8_t)(volume * 3);
-    setBlueJayNote(frequency, requested < beep_volume ? requested : beep_volume);
+    const uint8_t level = requested < beep_volume ? requested : beep_volume;
+    if (playing_frequency == frequency && playing_level == level) {
+        return;
+    }
+    setBlueJayNote(frequency, level);
     generatePwmTimerEvent();
-    comStep(3);
+    if (!playing_frequency) {
+        comStep(3);
+    }
+    playing_frequency = frequency;
+    playing_level = level;
 }
 #endif
 
